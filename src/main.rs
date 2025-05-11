@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use actix_web::{HttpResponse, HttpServer, Responder, guard, web};
+use actix_web::{HttpResponse, HttpServer, Responder, error, guard, web};
 use openssl::ssl::{SslAcceptor, SslFiletype};
 use serde::Deserialize;
 use std::time::Duration;
@@ -58,8 +58,15 @@ async fn main() -> std::io::Result<()> {
             .service(path_test)
             .service(path_test_by_struct)
             .service(query_test)
+            .service(login)
+            // .service(json_test)
             //这种方式是直接在这里定义路由
             .route("/hey", actix_web::web::get().to(manual_hello))
+            .service(
+                web::resource("/config")
+                .app_data(json_config(4096)) //设置json的最大长度
+                .route(web::post().to(json_test)) //设置路由
+            )
     })
     .keep_alive(Duration::from_secs(75)) //设置保持连接的时间
     .workers(10) //设置工作线程数
@@ -129,7 +136,7 @@ async fn path_test_by_struct(path: web::Path<UserInfo>) -> Result<String, actix_
         user_info.user_id, user_info.name
     ))
 }
-
+//这个函数关联了一个 SearchQuery 结构体
 //这个函数使用curl -k https://127.0.0.1:8087/query?q=your_query&lang=your_lang
 #[actix_web::get("/query")]
 // 该异步处理函数用于处理 GET /query 路由，接收查询参数并返回响应字符串
@@ -144,8 +151,28 @@ async fn query_test(query: web::Query<SearchQuery>) -> String {
     }
 }
 
+//这个函数关联了一个 UserIput 结构体
+//这个函数使用curl -k -X POST -H "Content-Type: application/json" -d '{"username":"your_username","email":"your_email"}' https://127.0.0.1:8087/json
+// #[actix_web::post("/json_test")] 这个注释掉的路由是因为在上面的配置函数中已经配置了
+async fn json_test(user: web::Json<UserIput>) -> String {
+    //获取json参数
+    let user = user.into_inner(); //这个into_inner()方法是将json参数转换为结构体
+    format!(
+        "Hello from json_test! Username: {}, Email: {}",
+        user.username, user.email
+    )
+}
 
-
+#[actix_web::post("/login")]
+//这个函数使用curl -k -X POST -H "Content-Type: application/x-www-form-urlencoded" -d 'username=your_username&password=your_password' https://127.0.0.1:8087/login
+async fn login(form: web::Form<LoginInfo>) -> String {
+    //获取表单参数
+    let login_info = form.into_inner(); //这个into_inner()方法是将表单参数转换为结构体
+    format!(
+        "Hello from login! Username: {}, Password: {}",
+        login_info.username, login_info.password
+    )
+}
 //--------------------------------------接下来都是结构体--------------------------------------
 struct AppState {
     app_name: String,
@@ -165,7 +192,19 @@ struct UserInfo {
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
-    lang:Option<String>,
+    lang: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UserIput {
+    username: String,
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct LoginInfo {
+    username: String,
+    password: String,
 }
 //---------------------------------------接下来都是配置--------------------------------------
 //这是app的配置函数
@@ -197,4 +236,17 @@ fn config2(cfg: &mut web::ServiceConfig) {
                     .to(|| async { HttpResponse::Ok().body("www site") }),
             ),
     );
+}
+
+//这个函数是用来设置json的配置的
+fn json_config(limit: usize) -> web::JsonConfig {
+    //设置json的最大长度
+    web::JsonConfig::default()
+        .limit(limit)
+        .error_handler(|err, _| {
+            //处理json解析错误
+            println!("json error: {}", err);
+            error::InternalError::from_response(err, HttpResponse::Conflict().body("json error"))
+                .into()
+        })
 }
