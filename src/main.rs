@@ -1,14 +1,18 @@
 use std::sync::Mutex;
 
-use actix_web::{body::BoxBody, error, guard, web, HttpResponse, HttpServer, Responder};
+use actix_web::Either;
+use actix_web::{
+    HttpResponse, HttpServer, Responder, body::BoxBody, error, guard,  web
+};
+use futures::stream::{self, Stream};
+use futures::StreamExt;
 use openssl::ssl::{SslAcceptor, SslFiletype};
 use serde::Deserialize;
-use std::time::Duration;
 use serde::Serialize;
 use serde_json;
-
-
-
+use std::time::Duration;
+use tokio::time::interval;
+use rand::Rng; 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -66,13 +70,15 @@ async fn main() -> std::io::Result<()> {
             .service(query_test)
             .service(login)
             .service(my_struct_test)
+            .service(stream_handler)
+            .service(process_data)
             // .service(json_test)
             //这种方式是直接在这里定义路由
             .route("/hey", actix_web::web::get().to(manual_hello))
             .service(
                 web::resource("/config")
-                .app_data(json_config(4096)) //设置json的最大长度
-                .route(web::post().to(json_test)) //设置路由
+                    .app_data(json_config(4096)) //设置json的最大长度
+                    .route(web::post().to(json_test)), //设置路由
             )
     })
     .keep_alive(Duration::from_secs(75)) //设置保持连接的时间
@@ -189,6 +195,29 @@ async fn my_struct_test() -> impl Responder {
     }
 }
 
+
+#[actix_web::get("/sse")]
+async fn stream_handler() -> HttpResponse {
+    let stream = cretae_sse_stream();//这里的这个cretae_sse_stream是一个函数，返回一个流
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .streaming(stream)
+}
+
+#[actix_web::get("/process")]
+async fn process_data() -> ProcessResult {
+    let success = rand::thread_rng().gen_bool(0.7);
+    if success {
+        println!("success");
+        Either::Left(MyStruct {
+            name: "Kayano".to_string(),
+            age: 18,
+        })
+    } else {
+        Either::Right(HttpResponse::InternalServerError().body("error"))
+    }
+    
+}
 //--------------------------------------接下来都是结构体--------------------------------------
 struct AppState {
     app_name: String,
@@ -230,7 +259,6 @@ struct MyStruct {
     name: String,
     age: u32,
 }
-
 
 //---------------------------------------接下来都是配置--------------------------------------
 //这是app的配置函数
@@ -284,10 +312,37 @@ impl Responder for MyStruct {
     // 实现 respond_to 方法，将 MyStruct 转换为 HTTP 响应
     fn respond_to(self, _req: &actix_web::HttpRequest) -> HttpResponse<Self::Body> {
         // 将结构体序列化为 JSON 字符串
-        let body  = serde_json::to_string(&self).unwrap();
+        let body = serde_json::to_string(&self).unwrap();
         // 构建 HTTP 响应，设置 Content-Type 为 application/json，并将序列化后的 JSON 作为响应体
         HttpResponse::Ok()
             .content_type("application/json")
             .body(body)
     }
 }
+
+//-----------------------------------------接下来是非路由函数--------------------------------------
+fn cretae_sse_stream() -> impl Stream<Item = Result<web::Bytes, std::io::Error>> {
+    // 定义一个计数器，用于生成递增的数据
+    let mut counter: usize = 0;
+    // 创建一个定时器，每隔1秒触发一次
+    let mut interval = interval(Duration::from_secs(1));
+    // 使用 poll_fn 创建一个自定义流
+    stream::poll_fn(move |cx| match interval.poll_tick(cx) {
+        // 如果定时器触发（每秒一次）
+        std::task::Poll::Ready(_) => {
+            counter += 1; // 计数器加1
+            // 构造 SSE 格式的数据字符串
+            let msg = format!("data: {}\n\n", counter);
+            // 返回数据（注意这里原本应返回 String，但实际返回了 Bytes，类型不符，建议修正）
+            std::task::Poll::Ready(Some(Ok(web::Bytes::from(msg))))
+        }
+        // 如果定时器还没到时间，则挂起等待
+        std::task::Poll::Pending => std::task::Poll::Pending,
+    })
+    // 限制流最多产生10条消息
+    .take(10)
+}
+
+
+type ProcessResult = Either<MyStruct,HttpResponse>;
+
