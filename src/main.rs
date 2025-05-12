@@ -1,9 +1,15 @@
 use std::sync::Mutex;
 
-use actix_web::{HttpResponse, HttpServer, Responder, error, guard, web};
+use actix_web::{body::BoxBody, error, guard, web, HttpResponse, HttpServer, Responder};
 use openssl::ssl::{SslAcceptor, SslFiletype};
 use serde::Deserialize;
 use std::time::Duration;
+use serde::Serialize;
+use serde_json;
+
+
+
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let counter_data = web::Data::new(AppStateWithCounter {
@@ -59,6 +65,7 @@ async fn main() -> std::io::Result<()> {
             .service(path_test_by_struct)
             .service(query_test)
             .service(login)
+            .service(my_struct_test)
             // .service(json_test)
             //这种方式是直接在这里定义路由
             .route("/hey", actix_web::web::get().to(manual_hello))
@@ -173,6 +180,15 @@ async fn login(form: web::Form<LoginInfo>) -> String {
         login_info.username, login_info.password
     )
 }
+
+#[actix_web::get("/my_struct")]
+async fn my_struct_test() -> impl Responder {
+    MyStruct {
+        name: "Kayano".to_string(),
+        age: 18,
+    }
+}
+
 //--------------------------------------接下来都是结构体--------------------------------------
 struct AppState {
     app_name: String,
@@ -206,6 +222,16 @@ struct LoginInfo {
     username: String,
     password: String,
 }
+
+//Serialize 是一个用于将数据结构序列化为 JSON 的 trait，而Deserialize 是一个用于将 JSON 反序列化为数据结构的 trait
+//它俩是相反的，Serialize 是将数据结构转换为 JSON 字符串，而 Deserialize 是将 JSON 字符串转换为数据结构
+#[derive(Serialize)]
+struct MyStruct {
+    name: String,
+    age: u32,
+}
+
+
 //---------------------------------------接下来都是配置--------------------------------------
 //这是app的配置函数
 fn config(cfg: &mut web::ServiceConfig) {
@@ -249,4 +275,19 @@ fn json_config(limit: usize) -> web::JsonConfig {
             error::InternalError::from_response(err, HttpResponse::Conflict().body("json error"))
                 .into()
         })
+}
+//----------------------------------------接下来都是为结构体实现trait--------------------------------------
+impl Responder for MyStruct {
+    // 指定响应体的类型为 BoxBody，这是 actix-web 推荐的响应体类型
+    type Body = BoxBody;
+
+    // 实现 respond_to 方法，将 MyStruct 转换为 HTTP 响应
+    fn respond_to(self, _req: &actix_web::HttpRequest) -> HttpResponse<Self::Body> {
+        // 将结构体序列化为 JSON 字符串
+        let body  = serde_json::to_string(&self).unwrap();
+        // 构建 HTTP 响应，设置 Content-Type 为 application/json，并将序列化后的 JSON 作为响应体
+        HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body)
+    }
 }
