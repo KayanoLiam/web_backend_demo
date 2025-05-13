@@ -1,18 +1,22 @@
 use std::sync::Mutex;
 
-use actix_web::Either;
+use actix_web::middleware::Logger;
+use actix_web::{Either, ResponseError, http};
 use actix_web::{
-    HttpResponse, HttpServer, Responder, body::BoxBody, error, guard,  web
+    HttpResponse, HttpServer, Responder, Result as ActixResult, body::BoxBody, error, guard, web,
 };
-use futures::stream::{self, Stream};
+use derive_more::{Display, Error};
 use futures::StreamExt;
+use futures::stream::{self, Stream};
 use openssl::ssl::{SslAcceptor, SslFiletype};
+// use openssl::string;
+use log::info;
+use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use std::time::Duration;
 use tokio::time::interval;
-use rand::Rng; 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -30,14 +34,24 @@ async fn main() -> std::io::Result<()> {
         .set_certificate_chain_file("cert.pem")
         .expect("Failed to set certificate chain");
 
+    unsafe {
+        std::env::set_var("RUST_LOG", "info");
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
+    env_logger::init();
+
     //创建新的http服务器
     HttpServer::new(move || {
+        let logger = Logger::default();
+
         actix_web::App::new()
+            .wrap(logger)
             .app_data(web::Data::new(AppState {
                 app_name: "Kayano".to_string(),
             }))
             .app_data(counter_data.clone())
             .configure(config)
+            .configure(config_error)
             // .app_data(web::Data::new(AppStateWithCounter {
             //     counter: Mutex::new(0),
             // }))
@@ -72,6 +86,8 @@ async fn main() -> std::io::Result<()> {
             .service(my_struct_test)
             .service(stream_handler)
             .service(process_data)
+            .service(index_by_my_error)
+            .service(process_form)
             // .service(json_test)
             //这种方式是直接在这里定义路由
             .route("/hey", actix_web::web::get().to(manual_hello))
@@ -195,15 +211,18 @@ async fn my_struct_test() -> impl Responder {
     }
 }
 
-
 #[actix_web::get("/sse")]
 async fn stream_handler() -> HttpResponse {
-    let stream = cretae_sse_stream();//这里的这个cretae_sse_stream是一个函数，返回一个流
+    let stream = create_sse_stream(); //这里的这个create_sse_stream是一个函数，返回一个流
     HttpResponse::Ok()
         .content_type("text/event-stream")
         .streaming(stream)
 }
 
+/// 处理 GET /process 路由，根据随机结果返回不同响应。
+/// - 70% 概率返回 JSON 格式的 MyStruct 数据（模拟成功）
+/// - 30% 概率返回 500 错误响应（模拟失败）
+/// 可用 curl -k https://127.0.0.1:8087/process 测试
 #[actix_web::get("/process")]
 async fn process_data() -> ProcessResult {
     let success = rand::thread_rng().gen_bool(0.7);
@@ -216,7 +235,63 @@ async fn process_data() -> ProcessResult {
     } else {
         Either::Right(HttpResponse::InternalServerError().body("error"))
     }
-    
+}
+
+#[actix_web::get("/first_error")]
+async fn index_by_my_error() -> Result<&'static str, MyError> {
+    info!("使用info日志记录");
+    Err(MyError {
+        name: "测试错误"
+    })
+}
+
+#[actix_web::get("/internal_error")]
+async fn index_by_my_new_error_internal() -> Result<&'static str, MyNewError> {
+    Err(MyNewError::InternalError)
+}
+
+#[actix_web::get("/timeout")]
+async fn index_by_my_new_error_timeout() -> Result<&'static str, MyNewError> {
+    Err(MyNewError::Timeout)
+}
+#[actix_web::get("/bad_client_data")]
+async fn index_by_my_new_error_bad_client_data() -> Result<&'static str, MyNewError> {
+    Err(MyNewError::BadClientData)
+}
+
+#[actix_web::get("/simple_error")] // 定义 GET 路由 /simple_error，访问该路径会调用此函数
+async fn index_by_simple_error() -> ActixResult<String> {
+    // 创建一个 Result 类型的变量 result，模拟一个错误（Err），错误类型为 MySimpleError
+    let result: Result<String, MySimpleError> = Err(MySimpleError {
+        name: "测试错误"
+    });
+    // 将 result 的错误类型 MySimpleError 映射为 actix_web 的错误类型
+    result.map_err(|err| {
+        // 如果发生错误，将错误信息转换为 HTTP 400 Bad Request 响应
+        error::ErrorBadRequest(err.name)
+    })
+}
+
+#[actix_web::get("/form_test")]
+async fn process_form() -> Result<&'static str, UserError> {
+    let user_input = "invalid_email"; // 假设这是用户输入
+    if !user_input.contains('@') {
+        // 简单的验证
+        // 返回一个用户可见的错误
+        return Err(UserError::ValidationError {
+            field: "email".to_string(),
+        });
+    }
+    Ok("处理成功")
+}
+
+#[actix_web::get("/user_facing_error")]
+async fn index_by_user_facing_error() -> ActixResult<&'static str, UserFacingError> {
+    do_thing_that_may_fail().map_err(|_| {
+        // 如果发生错误，返回一个用户可见的错误
+        UserFacingError::InternalError
+    })?;
+    Ok("处理成功")
 }
 //--------------------------------------接下来都是结构体--------------------------------------
 struct AppState {
@@ -260,6 +335,40 @@ struct MyStruct {
     age: u32,
 }
 
+#[derive(Debug, Display, Error)]
+struct MyError {
+    name: &'static str,
+}
+
+#[derive(Debug, Display, Error)]
+enum MyNewError {
+    #[display(fmt = "内部错误")]
+    InternalError,
+    #[display(fmt = "请求超时")]
+    Timeout,
+    #[display(fmt = "请求错误")]
+    BadClientData,
+}
+
+#[derive(Debug)]
+struct MySimpleError {
+    name: &'static str,
+}
+
+#[derive(Debug, Display, Error)]
+enum UserError {
+    #[display(fmt = "验证错误: {field}")]
+    ValidationError { field: String },
+}
+
+#[derive(Debug, Error)]
+struct InternalDbError;
+
+#[derive(Debug, Display, Error)]
+enum UserFacingError {
+    #[display(fmt = "发生了内部错误(用户可见错误)")]
+    InternalError,
+}
 //---------------------------------------接下来都是配置--------------------------------------
 //这是app的配置函数
 fn config(cfg: &mut web::ServiceConfig) {
@@ -304,7 +413,37 @@ fn json_config(limit: usize) -> web::JsonConfig {
                 .into()
         })
 }
+
+fn config_error(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::scope("/error")
+            .service(index_by_my_new_error_internal)
+            .service(index_by_my_new_error_timeout)
+            .service(index_by_my_new_error_bad_client_data)
+            .service(index_by_simple_error)
+            .service(index_by_user_facing_error)
+    );
+}
 //----------------------------------------接下来都是为结构体实现trait--------------------------------------
+impl std::fmt::Display for InternalDbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "数据库内部错误")
+    }
+}
+
+impl ResponseError for UserFacingError {
+    fn error_response(&self) -> HttpResponse<BoxBody> {
+        // 构建 HTTP 响应，设置 Content-Type 为 application/json，并将错误信息作为响应体
+        HttpResponse::InternalServerError()
+            .content_type("application/json")
+            .body(self.to_string())
+    }
+    fn status_code(&self) -> http::StatusCode {
+        // 返回 HTTP 状态码 500
+        http::StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 impl Responder for MyStruct {
     // 指定响应体的类型为 BoxBody，这是 actix-web 推荐的响应体类型
     type Body = BoxBody;
@@ -320,8 +459,45 @@ impl Responder for MyStruct {
     }
 }
 
+impl error::ResponseError for MyError {}
+
+impl error::ResponseError for MyNewError {
+    // 定义当错误发生时如何生成 HTTP 响应
+    fn error_response(&self) -> HttpResponse<BoxBody> {
+        // 使用 self.status_code() 获取对应的 HTTP 状态码，构建响应
+        HttpResponse::build(self.status_code())
+            // 设置响应头 Content-Type 为 application/json
+            .content_type("application/json")
+            // 响应体内容为错误的字符串描述（即枚举的 Display 实现）
+            .body(self.to_string())
+    }
+    // 定义每种错误对应的 HTTP 状态码
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        match self {
+            // InternalError 映射为 500 Internal Server Error
+            MyNewError::InternalError => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            // Timeout 映射为 408 Request Timeout
+            MyNewError::Timeout => actix_web::http::StatusCode::REQUEST_TIMEOUT,
+            // BadClientData 映射为 400 Bad Request
+            MyNewError::BadClientData => actix_web::http::StatusCode::BAD_REQUEST,
+        }
+    }
+}
+
+impl error::ResponseError for UserError {
+    fn error_response(&self) -> HttpResponse<BoxBody> {
+        HttpResponse::build(self.status_code())
+            .content_type("application/json")
+            .body(self.to_string())
+    }
+    fn status_code(&self) -> http::StatusCode {
+        match self {
+            UserError::ValidationError { .. } => http::StatusCode::BAD_REQUEST,
+        }
+    }
+}
 //-----------------------------------------接下来是非路由函数--------------------------------------
-fn cretae_sse_stream() -> impl Stream<Item = Result<web::Bytes, std::io::Error>> {
+fn create_sse_stream() -> impl Stream<Item = Result<web::Bytes, std::io::Error>> {
     // 定义一个计数器，用于生成递增的数据
     let mut counter: usize = 0;
     // 创建一个定时器，每隔1秒触发一次
@@ -343,6 +519,10 @@ fn cretae_sse_stream() -> impl Stream<Item = Result<web::Bytes, std::io::Error>>
     .take(10)
 }
 
+type ProcessResult = Either<MyStruct, HttpResponse>;
 
-type ProcessResult = Either<MyStruct,HttpResponse>;
-
+fn do_thing_that_may_fail() -> Result<(), InternalDbError> {
+    // 这里是一些可能会失败的操作
+    // 如果失败，返回一个 InternalDbError 错误
+    Err(InternalDbError)
+}
