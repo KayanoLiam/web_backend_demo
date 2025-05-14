@@ -358,6 +358,8 @@ struct MySimpleError {
 #[derive(Debug, Display, Error)]
 enum UserError {
     #[display(fmt = "验证错误: {field}")]
+    // 这里的花括号用于定义结构体变体（struct variant），
+    // 表示 ValidationError 变体携带一个名为 field 的 String 字段
     ValidationError { field: String },
 }
 
@@ -485,13 +487,18 @@ impl error::ResponseError for MyNewError {
 }
 
 impl error::ResponseError for UserError {
+    /// 当发生 UserError 错误时，如何生成 HTTP 响应
     fn error_response(&self) -> HttpResponse<BoxBody> {
-        HttpResponse::build(self.status_code())
-            .content_type("application/json")
-            .body(self.to_string())
+        // 构建 HTTP 响应，设置状态码和响应头
+        HttpResponse::build(self.status_code()) // 设置 HTTP 状态码（由下方 status_code 方法决定）
+            .content_type("application/json")   // 设置响应头 Content-Type 为 application/json
+            .body(self.to_string())             // 响应体为错误的字符串描述（即 Display 实现的内容）
     }
+
+    /// 指定每种 UserError 错误对应的 HTTP 状态码
     fn status_code(&self) -> http::StatusCode {
         match self {
+            // 如果是 ValidationError（验证错误），返回 400 Bad Request
             UserError::ValidationError { .. } => http::StatusCode::BAD_REQUEST,
         }
     }
