@@ -11,7 +11,7 @@ use std::time::Duration;  // 用于设置时间相关的配置
 
 // 外部库导入
 use actix_web::middleware::Logger;  // 用于请求日志记录
-use actix_web::{HttpServer, web};   // Web服务器和Web相关工具
+use actix_web::{guard, web, HttpServer};   // Web服务器和Web相关工具
 use openssl::ssl::{SslAcceptor, SslFiletype};
 // use rand::seq::index;  // SSL/TLS支持
 
@@ -108,6 +108,10 @@ async fn main() -> std::io::Result<()> {
                 // 为该路由指定名称"user_detail"，可用于反向URL生成
                 // 例如：req.url_for("user_detail", &["alice"]) 会生成 /user/alice
                 .name("user_detail")
+                // 添加请求守卫(guard)，只有当请求头中的Content-Type为"application/json"时才会匹配该路由
+                // 如果请求头不符合条件，路由匹配会失败，请求会继续尝试匹配其他路由
+                // 这对于确保只处理特定格式的请求非常有用，例如只接受JSON格式的数据
+                .guard(guard::Header("content-type", "application/json"))
                 // 配置GET请求的处理函数
                 // 当收到 GET /user/{name} 请求时，调用get_user函数处理
                 .route(web::get().to(get_user))
